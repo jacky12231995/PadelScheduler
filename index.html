@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Padel Doubles Scheduler (Flexible Players)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-100 min-h-screen">
+  <div class="max-w-6xl mx-auto p-6">
+    <header class="text-center mb-6">
+      <h1 class="text-2xl md:text-3xl font-bold text-slate-800">🎾 Padel Doubles Scheduler</h1>
+      <p class="text-slate-500 mt-1">2v2 · Any number of players · Balanced appearances · One-time score submit</p>
+    </header>
+
+    <!-- Settings -->
+    <section class="bg-white rounded-2xl shadow p-5 mb-6">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+        <div>
+          <label class="font-semibold">Player List (comma or newline separated)</label>
+          <textarea id="playersInput" rows="6"
+            class="w-full mt-2 border rounded-xl p-3 outline-none focus:ring-2 focus:ring-blue-400"
+            placeholder="Jacky, LU, Jax, Rex, Sam, Leo, Max, Ken"></textarea>
+          <p class="text-xs text-slate-500 mt-1">
+            If total players ≠ multiple of 4, a few will rest each round. The generator balances appearances automatically.
+          </p>
+        </div>
+
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="font-semibold">Matches per player (per round)</label>
+            <input id="matchesPerPlayer" type="number" min="1" value="2"
+              class="w-full mt-2 border rounded-xl p-3 outline-none focus:ring-2 focus:ring-blue-400" />
+          </div>
+          <div>
+            <label class="font-semibold">Number of courts</label>
+            <input id="numCourts" type="number" min="1" value="2"
+              class="w-full mt-2 border rounded-xl p-3 outline-none focus:ring-2 focus:ring-blue-400" />
+          </div>
+          <div class="flex items-end">
+            <button id="generateBtn"
+              class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-xl px-4 py-3 shadow">
+              Generate This Round
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Controls -->
+    <section class="flex flex-wrap gap-3 mb-6">
+      <button id="nextRoundBtn"
+        class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold rounded-xl px-4 py-3 shadow">
+        Next Round (Shuffle & Avoid Repeat Partners)
+      </button>
+      <span id="roundBadge"
+        class="ml-auto inline-flex items-center rounded-full bg-slate-800 text-white px-3 py-1 text-sm">
+        Current Round: <b class="ml-1" id="roundNum">1</b>
+      </span>
+    </section>
+
+    <!-- Schedule -->
+    <section class="bg-white rounded-2xl shadow p-5 mb-6">
+      <h2 class="text-xl font-bold text-slate-800">📅 Schedule</h2>
+      <div id="schedule" class="mt-3"></div>
+    </section>
+
+    <!-- Leaderboard -->
+    <section class="bg-white rounded-2xl shadow p-5 mb-10">
+      <h2 class="text-xl font-bold text-slate-800">🏆 Leaderboard</h2>
+      <div class="overflow-x-auto mt-3">
+        <table class="min-w-full text-sm text-center">
+          <thead class="bg-slate-100 text-slate-700">
+            <tr>
+              <th class="px-3 py-2">Rank</th>
+              <th class="px-3 py-2">Player</th>
+              <th class="px-3 py-2">Total Games Won</th>
+              <th class="px-3 py-2">Appearances</th>
+            </tr>
+          </thead>
+          <tbody id="leaderboard" class="text-slate-800"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <!-- Core Logic -->
+  <script>
+    // Global state (persists across rounds)
+    let roundIndex = 1;
+    let players = [];
+    const globalScores = {};        // player -> total games won
+    const globalAppearances = {};   // player -> total matches played
+    const pairCount = new Map();    // "A|B" -> how many times partnered (cross rounds)
+    let thisRoundMatches = [];      // list of match objects for current round
+
+    // Utils
+    const shuffle = arr => [...arr].sort(() => Math.random() - 0.5);
+    const pairKey = (a, b) => [a, b].sort().join("|");
+
+    function parsePlayers(input) {
+      const raw = input.split(/[\n,]/g).map(s => s.trim()).filter(Boolean);
+      const seen = new Set();
+      const out = [];
+      for (const name of raw) {
+        if (!seen.has(name)) { seen.add(name); out.push(name); }
+      }
+      return out;
+    }
+
+    function ensurePlayerStats(list) {
+      list.forEach(p => {
+        if (globalScores[p] == null) globalScores[p] = 0;
+        if (globalAppearances[p] == null) globalAppearances[p] = 0;
+      });
+    }
+
+    // Compute feasible matches this round: floor( sum(cap) / 4 )
+    function maxMatchesThisRound(nPlayers, matchesPerPlayer, courts) {
+      const theoretical = Math.floor((nPlayers * matchesPerPlayer) / 4);
+      // Courts do not hard-limit matches per court; we just round-robin court assignment.
+      // So the upper bound is theoretical.
+      return Math.max(0, theoretical);
+    }
+
+    // Choose 4 players with lowest appearances this round, and split into teams minimizing repeat partners
+    function pickFour(remainingCap, roundAppear, allPlayers) {
+      const pool = allPlayers.filter(p => remainingCap[p] > 0);
+      if (pool.length < 4) return null;
+
+      // Sort: least played this round, then least total appearances (all time)
+      pool.sort((a, b) => {
+        const ra = roundAppear[a] || 0;
+        const rb = roundAppear[b] || 0;
+        if (ra !== rb) return ra - rb;
+        return (globalAppearances[a] || 0) - (globalAppearances[b] || 0);
+      });
+
+      const K = Math.min(pool.length, 8);
+      const cand = pool.slice(0, K);
+
+      let best = null;
+      let bestScore = Infinity;
+
+      for (let i = 0; i < K; i++) for (let j = i + 1; j < K; j++)
+        for (let k = j + 1; k < K; k++) for (let l = k + 1; l < K; l++) {
+          const four = [cand[i], cand[j], cand[k], cand[l]];
+          const combos = [
+            [[four[0], four[1]], [four[2], four[3]]],
+            [[four[0], four[2]], [four[1], four[3]]],
+            [[four[0], four[3]], [four[1], four[2]]],
+          ];
+          for (const [A, B] of combos) {
+            const sA = pairCount.get(pairKey(A[0], A[1])) || 0;
+            const sB = pairCount.get(pairKey(B[0], B[1])) || 0;
+            const score = sA + sB;
+            if (score < bestScore) { bestScore = score; best = { teamA: A, teamB: B }; }
+          }
+        }
+      return best;
+    }
+
+    function generateRound() {
+      const rawInput = document.getElementById("playersInput").value.trim();
+      if (!rawInput) { alert("Please enter player names."); return; }
+      players = parsePlayers(rawInput);
+      const matchesPerPlayer = Math.max(1, parseInt(document.getElementById("matchesPerPlayer").value || "2", 10));
+      const numCourts = Math.max(1, parseInt(document.getElementById("numCourts").value || "2", 10));
+
+      if (players.length < 4) { alert("At least 4 players are required for 2v2."); return; }
+      ensurePlayerStats(players);
+
+      // Round state
+      thisRoundMatches = [];
+      const roundAppear = Object.fromEntries(players.map(p => [p, 0]));
+      const remainingCap = Object.fromEntries(players.map(p => [p, matchesPerPlayer]));
+
+      const totalMatches = maxMatchesThisRound(players.length, matchesPerPlayer, numCourts);
+      const courtNames = Array.from({ length: numCourts }, (_, i) => `Court ${i + 1}`);
+      let nextCourtIdx = 0;
+
+      // Work off a stable order to break ties fairly
+      const order = shuffle([...players]);
+
+      for (let m = 1; m <= totalMatches; m++) {
+        const chosen = pickFour(remainingCap, roundAppear, order);
+        if (!chosen) break;
+
+        const court = courtNames[nextCourtIdx];
+        nextCourtIdx = (nextCourtIdx + 1) % numCourts;
+
+        // Update per-round counts and caps
+        for (const p of [...chosen.teamA, ...chosen.teamB]) {
+          roundAppear[p]++;
+          remainingCap[p]--;
+        }
+
+        // Update global partner history (used to avoid repeat partners across rounds)
+        const keyA = pairKey(chosen.teamA[0], chosen.teamA[1]);
+        const keyB = pairKey(chosen.teamB[0], chosen.teamB[1]);
+        pairCount.set(keyA, (pairCount.get(keyA) || 0) + 1);
+        pairCount.set(keyB, (pairCount.get(keyB) || 0) + 1);
+
+        thisRoundMatches.push({
+          id: `${roundIndex}-${m}`,
+          court,
+          teamA: chosen.teamA,
+          teamB: chosen.teamB,
+          scoreA: "",
+          scoreB: "",
+          applied: false
+        });
+      }
+
+      renderSchedule();
+      renderLeaderboard(); // ensure table shows all players
+    }
+
+    function renderSchedule() {
+      const wrap = document.getElementById("schedule");
+      if (!thisRoundMatches.length) {
+        wrap.innerHTML = `<p class="text-slate-500">No matches yet. Click "Generate This Round".</p>`;
+        return;
+      }
+
+      const grouped = new Map();
+      for (const m of thisRoundMatches) {
+        if (!grouped.has(m.court)) grouped.set(m.court, []);
+        grouped.get(m.court).push(m);
+      }
+
+      let html = "";
+      for (const [court, list] of grouped) {
+        html += `<div class="mb-5">
+          <h3 class="font-semibold text-slate-800 mb-2">${court}</h3>
+          <div class="overflow-x-auto">
+            <table class="min-w-full text-sm text-center border">
+              <thead class="bg-slate-50">
+                <tr>
+                  <th class="px-3 py-2 border">#</th>
+                  <th class="px-3 py-2 border">Team A</th>
+                  <th class="px-3 py-2 border">Score</th>
+                  <th class="px-3 py-2 border">Team B</th>
+                  <th class="px-3 py-2 border">Action</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y">`;
+
+        list.forEach((m, idx) => {
+          const disabled = m.applied ? "disabled opacity-50 cursor-not-allowed" : "";
+          html += `<tr id="row_${m.id}">
+            <td class="border px-3 py-2">${m.id}</td>
+            <td class="border px-3 py-2">${m.teamA.join(" + ")}</td>
+            <td class="border px-3 py-2">
+              <input id="sa_${m.id}" type="number" min="0" class="w-16 border rounded-lg p-1 text-center"
+                     value="${m.scoreA}" ${m.applied ? "disabled" : ""}/>
+              <span class="px-1">-</span>
+              <input id="sb_${m.id}" type="number" min="0" class="w-16 border rounded-lg p-1 text-center"
+                     value="${m.scoreB}" ${m.applied ? "disabled" : ""}/>
+            </td>
+            <td class="border px-3 py-2">${m.teamB.join(" + ")}</td>
+            <td class="border px-3 py-2">
+              <button id="btn_${m.id}" class="bg-slate-800 hover:bg-slate-900 text-white rounded-lg px-3 py-1 ${disabled}"
+                      onclick="applyResult('${m.id}')" ${m.applied ? "disabled" : ""}>
+                ${m.applied ? "Submitted" : "Submit"}
+              </button>
+            </td>
+          </tr>`;
+        });
+
+        html += `</tbody></table></div></div>`;
+      }
+
+      wrap.innerHTML = html;
+    }
+
+    // One-time apply per match: Team A players +scoreA, Team B players +scoreB; lock inputs & button
+    function applyResult(matchId) {
+      const match = thisRoundMatches.find(x => x.id === matchId);
+      if (!match || match.applied) return;
+
+      const saInput = document.getElementById(`sa_${matchId}`);
+      const sbInput = document.getElementById(`sb_${matchId}`);
+      const btn = document.getElementById(`btn_${matchId}`);
+
+      const a = Number(saInput.value);
+      const b = Number(sbInput.value);
+      if (!Number.isFinite(a) || !Number.isFinite(b) || a < 0 || b < 0 || saInput.value === "" || sbInput.value === "") {
+        alert("Enter valid non-negative integers, e.g. 3 and 2.");
+        return;
+      }
+
+      // Update global scores and appearances
+      match.teamA.forEach(p => { globalScores[p] = (globalScores[p] || 0) + a; globalAppearances[p] = (globalAppearances[p] || 0) + 1; });
+      match.teamB.forEach(p => { globalScores[p] = (globalScores[p] || 0) + b; globalAppearances[p] = (globalAppearances[p] || 0) + 1; });
+
+      // Lock this match
+      match.applied = true;
+      match.scoreA = a;
+      match.scoreB = b;
+      saInput.disabled = true;
+      sbInput.disabled = true;
+      btn.disabled = true;
+      btn.textContent = "Submitted";
+      btn.classList.add("opacity-50", "cursor-not-allowed");
+
+      renderLeaderboard();
+    }
+
+    function renderLeaderboard() {
+      // Show only players currently listed, ordered by score desc, then name
+      const names = [...new Set(players)];
+      const rows = names.map(p => ({
+        name: p,
+        score: globalScores[p] || 0,
+        apps: globalAppearances[p] || 0
+      })).sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+
+      const tbody = document.getElementById("leaderboard");
+      tbody.innerHTML = rows.map((r, i) => `
+        <tr>
+          <td class="px-3 py-2">${i + 1}</td>
+          <td class="px-3 py-2">${r.name}</td>
+          <td class="px-3 py-2">${r.score}</td>
+          <td class="px-3 py-2">${r.apps}</td>
+        </tr>
+      `).join("");
+    }
+
+    function nextRound() {
+      roundIndex++;
+      document.getElementById("roundNum").textContent = String(roundIndex);
+      generateRound(); // keeps globalScores, globalAppearances, pairCount
+    }
+
+    // Bind buttons
+    document.getElementById("generateBtn").addEventListener("click", () => {
+      roundIndex = 1;
+      document.getElementById("roundNum").textContent = "1";
+      // Do NOT reset global scores so you can paste new list mid-event if needed; but usually you’d keep same players.
+      generateRound();
+    });
+    document.getElementById("nextRoundBtn").addEventListener("click", nextRound);
+
+    // Demo seed
+    document.getElementById("playersInput").value = [
+      "Jacky","LU","Jax","Rex","Sam","Leo","Max","Ken","Ivy","Mia","Neo","Ben"
+    ].join(", ");
+    generateRound();
+  </script>
+</body>
+</html>
