@@ -1173,10 +1173,32 @@ const parsed = JSON.parse(restored);
   renderLeaderboards();
 });
 
+// Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+import { getAnalytics } from "firebase/analytics";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
 
+// Your web app's Firebase configuration
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
+const firebaseConfig = {
+  apiKey: "AIzaSyAnxBxk6MbuAHoOcLWAI60Ll9H02Rn4ubI",
+  authDomain: "padel-schedular.firebaseapp.com",
+  databaseURL: "https://padel-schedular-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "padel-schedular",
+  storageBucket: "padel-schedular.firebasestorage.app",
+  messagingSenderId: "834469172805",
+  appId: "1:834469172805:web:54c87f24a2bcd7ed67b52c",
+  measurementId: "G-WGX6F89TF6"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const analytics = getAnalytics(app);
 </script>
 </body>
 </html>
+
 
 
 
