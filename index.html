@@ -64,26 +64,6 @@
   border-bottom: 1px solid rgba(255,255,255,0.05);
 }
 
-/* ✅ 固定比赛表格 (#tblA / #tblB) 的列宽 */
-#tblA th:nth-child(1), #tblB th:nth-child(1),
-#tblA td:nth-child(1), #tblB td:nth-child(1) { width: 8%; }
-
-#tblA th:nth-child(2), #tblB th:nth-child(2),
-#tblA td:nth-child(2), #tblB td:nth-child(2) { width: 25%; }
-
-#tblA th:nth-child(3), #tblB th:nth-child(3),
-#tblA td:nth-child(3), #tblB td:nth-child(3) { width: 25%; }
-
-#tblA th:nth-child(4), #tblB th:nth-child(4),
-#tblA td:nth-child(4), #tblB td:nth-child(4) { width: 12%; }
-
-#tblA th:nth-child(5), #tblB th:nth-child(5),
-#tblA td:nth-child(5), #tblB td:nth-child(5) { width: 12%; }
-
-#tblA th:nth-child(6), #tblB th:nth-child(6),
-#tblA td:nth-child(6), #tblB td:nth-child(6) { width: 18%; }
-
-
 .table tbody tr:hover {
   background: rgba(255,255,255,0.06);
 }
@@ -156,6 +136,29 @@ input:disabled, select:disabled, textarea:disabled {
 /* 📱 在手机上让表格走横向滚动，别再把列挤爆 */
 @media (max-width: 640px) {
   .table { min-width: 720px; }   /* 强制最小宽度，容器会横向滚动 */
+}
+/* Leaderboard 宽度控制 */
+.leaderboard-container {
+  max-width: 900px;   /* 桌面端保持和上面表格差不多 */
+  margin: 0 auto;     /* 居中 */
+  width: 100%;
+}
+
+@media (max-width: 768px) {
+  .leaderboard-container {
+    max-width: 100%;  /* 小屏手机撑满 */
+    margin: 0;
+  }
+}
+/* ✅ 让 Leaderboard 表格不受 6 列定宽影响 */
+.leaderboard-container .table {
+  table-layout: auto;      /* 自适应列宽 */
+  min-width: 760px;        /* 小屏可横向滚动时的最小宽度 */
+}
+.leaderboard-container .table th,
+.leaderboard-container .table td {
+  width: auto;             /* 解除列宽限制 */
+  white-space: nowrap;     /* 避免换行挤占空间 */
 }
 
 </style>
@@ -245,14 +248,22 @@ input:disabled, select:disabled, textarea:disabled {
         </table>
       </div>
     </div>
-     <!-- Leaderboards 占满两列 -->
-<div class="card p-4 md:col-span-2">
-  <div id="lbPanels"></div>
-</div>
-  </section>
 
+  <!-- Leaderboards -->
+    <!-- Leaderboards -->
+  <section class="card p-4 md:col-span-2 leaderboard-container">
+  <h2 class="font-semibold">Leaderboards</h2>
+    
+ <!-- ✅ Leaderboards 按钮行 -->
+<div class="flex flex-col sm:flex-row gap-2 sm:justify-end mb-3">
+  <button id="btnSubmit" class="btn w-full sm:w-auto px-4 py-2 text-sm sm:text-base">Submit Scores</button>
+  <button id="btnResubmit" class="btn w-full sm:w-auto px-4 py-2 text-sm sm:text-base">Resubmit</button>
+  <button id="btnRecalcLB" class="btn w-full sm:w-auto px-4 py-2 text-sm sm:text-base">Recalculate</button>
 </div>
-
+    
+  <div id="lbPanels" class="space-y-6"></div>
+</section>
+    </section>
 <script>
 
 /* =========================
@@ -268,7 +279,9 @@ const STATE = {
   roster: {1:{A:[],B:[]},2:{A:[],B:[]},3:{A:[],B:[]},4:{A:[],B:[]}},
   matches: {1:{A:[],B:[]},2:{A:[],B:[]},3:{A:[],B:[]},4:{A:[],B:[]}},
   results: {1:{A:[],B:[]},2:{A:[],B:[]},3:{A:[],B:[]},4:{A:[],B:[]}},
-  submittedAt: {}
+  submittedAt: {},
+  partnerStats: {},   // ✅ 新增：搭档次数统计 { Alice: { Bob: 2, ... }, ... }
+
 };
 
 /* =========================
@@ -276,6 +289,17 @@ const STATE = {
    ========================= */
 function shuffle(arr){ const a=[...arr]; for(let i=a.length-1;i>0;i--){ const j = Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]];} return a; }
 function keyPair(a,b){ return [a,b].sort().join("|"); }
+// ✅ 比赛去重：把一场（两支队）做成固定字符串
+function matchKey(t1, t2){
+  const pk1 = keyPair(t1[0], t1[1]);         // 队内两人排序
+  const pk2 = keyPair(t2[0], t2[1]);
+  return [pk1, pk2].sort().join(" || ");      // 两队再排序，得到唯一键
+}
+
+// ✅ 记录“四人组”被用过几次（避免同一组四个人总是打在一起）
+function fourKey(t1, t2){
+  return [...t1, ...t2].slice().sort().join("|");
+}
 
 /* Validate players - allow >=5 (odd OK) */
 function ensureMinPlayers(list){
@@ -314,52 +338,90 @@ function base64ToUint8(base64) {
   return bytes;
 }
 
+  /* =========================
+   Partner stats helpers
+   ========================= */
+
+// 把一场比赛里的两支队更新到 partnerStats
+function updatePartnerStats(t1, t2){
+  const teams = [t1 || [], t2 || []];
+  teams.forEach(team => {
+    // team 里任意两人都算搭档+1
+    for (let i=0; i<team.length; i++){
+      for (let j=i+1; j<team.length; j++){
+        const a = team[i], b = team[j];
+        if (!a || !b) continue;
+        if (!STATE.partnerStats[a]) STATE.partnerStats[a] = {};
+        if (!STATE.partnerStats[b]) STATE.partnerStats[b] = {};
+        STATE.partnerStats[a][b] = (STATE.partnerStats[a][b] || 0) + 1;
+        STATE.partnerStats[b][a] = (STATE.partnerStats[b][a] || 0) + 1;
+      }
+    }
+  });
+}
+
+// 从所有 rounds 的 matches 重新计算一遍（用于加载老数据或容错）
+function recomputePartnerStatsFromAllMatches(){
+  STATE.partnerStats = {};
+  for (let r = 1; r <= 4; r++){
+    ["A","B"].forEach(court => {
+      const arr = STATE.matches?.[r]?.[court] || [];
+      arr.forEach(m => updatePartnerStats(m.t1, m.t2));
+    });
+  }
+}
+
+
 /* =========================
    Optimized scheduling
    ========================= */
 function scheduleCourt(players, K) {
   const N = players.length;
-  if (N < 4) return []; // UI 会在 2 场地模式下自动回退到 1 场地
+  if (N < 4) return [];
 
-  // 计算总场次数与每人目标至少 K，可能有少数人 K+1（使总出场数能被4整除）
+  // ---- 计算需要的“出场位”并把余数分散给前面几人（K 或 K+1）----
   const spotsMin = K * N;
   const matchesNeeded = Math.ceil(spotsMin / 4);
-  const totalSpots = matchesNeeded * 4;             // 实际要分配的“上场位”
-  const extras = totalSpots - spotsMin;             // 0~3
-  const shuffled = shuffle(players);
+  const totalSpots = matchesNeeded * 4;
+  const extras = totalSpots - spotsMin;
 
-  const target = {};  // 目标出场次数（K 或 K+1）
-  const need = {};    // 剩余需要的次数
-  const apps = {};    // 实际已安排次数（用于挑“垫场队员”）
-  for (let i=0;i<N;i++){
-    const p = shuffled[i];
+  const order = shuffle(players);
+  const target = {}, need = {}, apps = {};
+  for (let i = 0; i < N; i++) {
+    const p = order[i];
     target[p] = K + (i < extras ? 1 : 0);
-    need[p] = target[p];
-    apps[p] = 0;
+    need[p]   = target[p];
+    apps[p]   = 0;
   }
 
-  // 记录搭档/对手，尽量减少重复
   const partnerCount = new Map();
-  const vsCount = {};
-  players.forEach(p => vsCount[p] = {});
+  const vsCount = {}; players.forEach(p => vsCount[p] = {});
+  const seenMatches = new Set();
+  const fourCount = new Map();
+  const pairLastUsed = new Map();
+  const COOLDOWN = Math.max(3, Math.floor(matchesNeeded / 4));
 
   const matches = [];
   let guard = 0;
 
-  function pickFour(){
-    // 先选 need>0 的，优先 need 高、apps 低
+  function pickFour() {
     const needers = players
       .filter(p => need[p] > 0)
-      .sort((a,b) => (need[b]-need[a]) || (apps[a]-apps[b]) || a.localeCompare(b));
-
-    let pick = needers.slice(0,4);
-
-    // 不足4个，用“垫场队员”补齐：优先 apps 少、且没有被选中过
-    if (pick.length < 4){
+      .sort((a, b) =>
+        (need[b] - need[a]) ||
+        (apps[a] - apps[b]) ||
+        ((Math.random() < 0.5) ? -1 : 1)
+      );
+    let pick = needers.slice(0, 4);
+    if (pick.length < 4) {
       const boosters = players
         .filter(p => !pick.includes(p))
-        .sort((a,b) => (apps[a]-apps[b]) || (need[b]-need[a]) || a.localeCompare(b));
-      for (const p of boosters){
+        .sort((a, b) =>
+          (apps[a] - apps[b]) ||
+          (need[b] - need[a]) ||
+          ((Math.random() < 0.5) ? -1 : 1)
+        );
+      for (const p of boosters) {
         pick.push(p);
         if (pick.length === 4) break;
       }
@@ -367,47 +429,97 @@ function scheduleCourt(players, K) {
     return pick.length === 4 ? pick : [];
   }
 
-  while (Object.values(need).some(v=>v>0) && guard++ < 5000){
-    const cand = pickFour();
+  while (Object.values(need).some(v => v > 0) && guard++ < 8000) {
+    let cand = pickFour();
     if (cand.length < 4) break;
 
-    // 三种可能的搭配，选重复最少的
-    const partitions = [
-      [[cand[0], cand[1]], [cand[2], cand[3]]],
-      [[cand[0], cand[2]], [cand[1], cand[3]]],
-      [[cand[0], cand[3]], [cand[1], cand[2]]]
-    ];
+    let chosen = null;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const partitions = [
+        [[cand[0], cand[1]], [cand[2], cand[3]]],
+        [[cand[0], cand[2]], [cand[1], cand[3]]],
+        [[cand[0], cand[3]], [cand[1], cand[2]]],
+      ];
 
-    let best = null, bestScore = Infinity;
-    for (const [t1, t2] of partitions) {
-      const pk1 = keyPair(t1[0], t1[1]);
-      const pk2 = keyPair(t2[0], t2[1]);
-      let score = (partnerCount.get(pk1) || 0) * 100 + (partnerCount.get(pk2) || 0) * 100;
-      for (const a of t1) for (const b of t2) score += (vsCount[a][b] || 0) * 10;
-      if (score < bestScore) { bestScore = score; best = { t1, t2 }; }
+      let best = null, bestScore = Infinity;
+      for (const [t1, t2] of partitions) {
+        const pk1 = keyPair(t1[0], t1[1]);
+        const pk2 = keyPair(t2[0], t2[1]);
+        let score =
+          (partnerCount.get(pk1) || 0) * 1200 +
+          (partnerCount.get(pk2) || 0) * 1200;
+        for (const a of t1) for (const b of t2) {
+          score += (vsCount[a][b] || 0) * 45;
+        }
+        score += (fourCount.get(fourKey(t1, t2)) || 0) * 300;
+        const last1 = pairLastUsed.get(pk1);
+        const last2 = pairLastUsed.get(pk2);
+        if (last1 != null && matches.length - last1 < COOLDOWN) score += 5000;
+        if (last2 != null && matches.length - last2 < COOLDOWN) score += 5000;
+        if (seenMatches.has(matchKey(t1, t2))) score += 1e8;
+        if (score < bestScore) { bestScore = score; best = { t1, t2 }; }
+      }
+      if (!seenMatches.has(matchKey(best.t1, best.t2))) {
+        chosen = best; break;
+      }
+      if (attempt < 3) { cand.push(cand.shift()); }
+      else {
+        const outIdx = cand.map((p,i)=>({p,i}))
+                           .sort((x,y)=>apps[y.p]-apps[x.p])[0].i;
+        const pool = players
+          .filter(p => !cand.includes(p))
+          .sort((a,b)=>(apps[a]-apps[b])||((Math.random()<0.5)?-1:1));
+        if (pool.length) cand[outIdx] = pool[0];
+      }
     }
 
-    matches.push(best);
+    if (!chosen) {
+      const partitions = [
+        [[cand[0], cand[1]], [cand[2], cand[3]]],
+        [[cand[0], cand[2]], [cand[1], cand[3]]],
+        [[cand[0], cand[3]], [cand[1], cand[2]]],
+      ];
+      let best = null, bestSeen = Infinity, bestScore = Infinity;
+      for (const [t1, t2] of partitions) {
+        const mKey = matchKey(t1, t2);
+        const seenTimes = seenMatches.has(mKey) ? 1 : 0;
+        const pk1 = keyPair(t1[0], t1[1]);
+        const pk2 = keyPair(t2[0], t2[1]);
+        let score =
+          (partnerCount.get(pk1) || 0) * 1200 +
+          (partnerCount.get(pk2) || 0) * 1200 +
+          (fourCount.get(fourKey(t1, t2)) || 0) * 300;
+        if (seenTimes < bestSeen || (seenTimes === bestSeen && score < bestScore)) {
+          bestSeen = seenTimes; bestScore = score; best = { t1, t2 };
+        }
+      }
+      chosen = best;
+    }
 
-    // 更新计数
-    const four = [...best.t1, ...best.t2];
-    for (const p of four){
+    matches.push(chosen);
+    const mk = matchKey(chosen.t1, chosen.t2);
+    seenMatches.add(mk);
+    fourCount.set(fourKey(chosen.t1, chosen.t2), (fourCount.get(fourKey(chosen.t1, chosen.t2)) || 0) + 1);
+    const pk1 = keyPair(chosen.t1[0], chosen.t1[1]);
+    const pk2 = keyPair(chosen.t2[0], chosen.t2[1]);
+    partnerCount.set(pk1, (partnerCount.get(pk1) || 0) + 1);
+    partnerCount.set(pk2, (partnerCount.get(pk2) || 0) + 1);
+    pairLastUsed.set(pk1, matches.length - 1);
+    pairLastUsed.set(pk2, matches.length - 1);
+    for (const a of chosen.t1) for (const b of chosen.t2) {
+      vsCount[a][b] = (vsCount[a][b] || 0) + 1;
+      vsCount[b][a] = (vsCount[b][a] || 0) + 1;
+    }
+    [...chosen.t1, ...chosen.t2].forEach(p => {
       apps[p] += 1;
-      if (need[p] > 0) need[p] -= 1; // 只有未达标的人才扣 need
-    }
-
-    const pk1 = keyPair(best.t1[0], best.t1[1]);
-    const pk2 = keyPair(best.t2[0], best.t2[1]);
-    partnerCount.set(pk1, (partnerCount.get(pk1)||0)+1);
-    partnerCount.set(pk2, (partnerCount.get(pk2)||0)+1);
-    for (const a of best.t1) for (const b of best.t2) {
-      vsCount[a][b] = (vsCount[a][b]||0) + 1;
-      vsCount[b][a] = (vsCount[b][a]||0) + 1;
-    }
+      if (need[p] > 0) need[p] -= 1;
+    });
+    updatePartnerStats(chosen.t1, chosen.t2);   // ✅ 新增：每生成一场就累计搭档
   }
 
   return matches;
 }
+
 
 /* =========================
    Render: rounds & leaderboards
@@ -472,6 +584,8 @@ function calcRoundStats(round){
   STATE.players.forEach(p => { if (!stats[p]) stats[p] = { pts:0, apps:0, court: (STATE.roster[round]?.A.includes(p) ? "A" : (STATE.roster[round]?.B.includes(p)? "B":"-")) }; });
   return stats;
 }
+
+
 function renderLeaderboards(){
   const host = document.getElementById("lbPanels");
   host.innerHTML = "";
@@ -483,6 +597,9 @@ function renderLeaderboards(){
 
   // ✅ 总榜永远显示
   host.appendChild(renderOverallBoard());
+  // ✅ 搭档矩阵
+host.appendChild(renderPartnerMatrix());
+
 }
 
 function renderRoundBoard(r){
@@ -549,93 +666,167 @@ function renderRoundBoard(r){
 function renderOverallBoard(){
   const wrap = document.createElement("div");
   wrap.innerHTML = `<h3 class="font-semibold">Overall Leaderboard</h3>`;
-    const scrollWrap = document.createElement("div");
+
+  const scrollWrap = document.createElement("div");
   scrollWrap.className = "overflow-x-auto";
 
   const table = document.createElement("table"); 
   table.className = "table mt-2";
   table.innerHTML = `
-  <thead>
-    <tr>
-      <th>#</th>
-      <th>Player</th>
-      <th>R1</th>
-      <th>R2</th>
-      <th>R3</th>
-      <th>R4</th>
-      <th>Total Points</th>
-      <th>Total Apps</th>
-    </tr>
-  </thead>
-  <tbody></tbody>
-`;
-
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Player</th>
+        <th>R1</th>
+        <th>R2</th>
+        <th>R3</th>
+        <th>R4</th>
+        <th>Total Points</th>
+        <th>Total Apps</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  `;
 
   scrollWrap.appendChild(table);
   wrap.appendChild(scrollWrap);
 
   const tb = table.querySelector("tbody");
 
+  // 聚合每人每轮
   const per = {};
   STATE.players.forEach(p => per[p] = { r: [{pts:0,apps:0},{pts:0,apps:0},{pts:0,apps:0},{pts:0,apps:0}] });
 
   for (let r=1; r<=4; r++){
     const st = calcRoundStats(r);
-    STATE.players.forEach(p => per[p].r[r-1] = st[p] ? { pts: st[p].pts, apps: st[p].apps } : { pts:0, apps:0 } );
+    STATE.players.forEach(p => {
+      per[p].r[r-1] = st[p] ? { pts: st[p].pts, apps: st[p].apps } : { pts:0, apps:0 };
+    });
   }
 
   const rows = STATE.players.map(p => {
     const r1=per[p].r[0], r2=per[p].r[1], r3=per[p].r[2], r4=per[p].r[3];
-    const total = r1.pts + r2.pts + r3.pts + r4.pts;
-    return { player: p, r1, r2, r3, r4, total };
-  }).sort((a,b) => b.total - a.total || a.player.localeCompare(b.player));
+    const totalPts  = r1.pts + r2.pts + r3.pts + r4.pts;
+    const totalApps = r1.apps + r2.apps + r3.apps + r4.apps;
+    return { player: p, r1, r2, r3, r4, totalPts, totalApps };
+  }).sort((a,b) => b.totalPts - a.totalPts || a.player.localeCompare(b.player));
 
-rows.forEach((row, i) => {
-  const cup = i===0 ? "🏆 " : i===1 ? "🥈 " : i===2 ? "🥉 " : "";
-  const totalApps = row.r1.apps + row.r2.apps + row.r3.apps + row.r4.apps;
-  tb.innerHTML += `
-    <tr>
-      <td>${i+1}</td>
-      <td>${cup}${row.player}</td>
-      <td>${row.r1.pts}</td>
-      <td>${row.r2.pts}</td>
-      <td>${row.r3.pts}</td>
-      <td>${row.r4.pts}</td>
-      <td class="font-semibold">${row.total}</td>
-      <td>${totalApps}</td>
-    </tr>
-  `;
-});
-
+  rows.forEach((row, i) => {
+    const cup = i===0 ? "🏆 " : i===1 ? "🥈 " : i===2 ? "🥉 " : "";
+    tb.innerHTML += `
+      <tr>
+        <td>${i+1}</td>
+        <td>${cup}${row.player}</td>
+        <td>${row.r1.pts}</td>
+        <td>${row.r2.pts}</td>
+        <td>${row.r3.pts}</td>
+        <td>${row.r4.pts}</td>
+        <td class="font-semibold">${row.totalPts}</td>
+        <td>${row.totalApps}</td>
+      </tr>`;
+  });
 
   return wrap;
 }
+/* =========================
+   Render: Partner Matrix
+   ========================= */
+function renderPartnerMatrix(){
+  const wrap = document.createElement("div");
+  wrap.innerHTML = `<h3 class="font-semibold mt-4">Partner Matrix</h3>`;
+
+  const players = STATE.players.slice();
+  // 计算最大值用于着色归一化
+  let maxVal = 0;
+  players.forEach(a => players.forEach(b => {
+    if (a===b) return;
+    const v = STATE.partnerStats?.[a]?.[b] || 0;
+    if (v > maxVal) maxVal = v;
+  }));
+
+  function cellBg(v){
+    if (!maxVal) return "rgba(148,163,184,0.08)"; // slate-400 很淡
+    const alpha = 0.12 + 0.88 * (v / maxVal);     // 0.12 ~ 1.0
+    return `rgba(34,197,94,${alpha})`;            // 绿色系（Tailwind green-500 的 HSL 近似）
+  }
+
+  const scroll = document.createElement("div");
+  scroll.className = "overflow-x-auto";
+  const table = document.createElement("table");
+  table.className = "table mt-2";
+
+  // 构建表头
+  let html = "<thead><tr><th>Player</th>";
+  players.forEach(p => html += `<th>${p}</th>`);
+  html += "</tr></thead><tbody>";
+
+  // 构建主体
+  players.forEach(rowP => {
+    html += `<tr><td>${rowP}</td>`;
+    players.forEach(colP => {
+      if (rowP === colP){
+        html += `<td style="background: rgba(100,116,139,0.15)">—</td>`;
+      } else {
+        const val = STATE.partnerStats?.[rowP]?.[colP] || 0;
+        const bg = cellBg(val);
+        html += `<td title="${rowP} × ${colP}: ${val}" style="background:${bg}; font-weight:600;">${val}</td>`;
+      }
+    });
+    html += "</tr>";
+  });
+
+  html += "</tbody>";
+  table.innerHTML = html;
+  scroll.appendChild(table);
+  wrap.appendChild(scroll);
+  return wrap;
+}
+
 
 /* =========================
    Export CSV (Overall)
    ========================= */
 function exportCSV(){
   const rows = [];
-  const header = ["#", "Player", "R1 Pts", "R1 Apps", "R2 Pts", "R2 Apps", "R3 Pts", "R3 Apps", "R4 Pts", "R4 Apps", "Total"];
+  const header = [
+    "#", "Player",
+    "R1 Pts", "R1 Apps",
+    "R2 Pts", "R2 Apps",
+    "R3 Pts", "R3 Apps",
+    "R4 Pts", "R4 Apps",
+    "Total Points", "Total Apps"
+  ];
   rows.push(header);
+
   const per = {};
   STATE.players.forEach(p => per[p] = { r: [{pts:0,apps:0},{pts:0,apps:0},{pts:0,apps:0},{pts:0,apps:0}] });
   for (let r=1;r<=4;r++){
     const st = calcRoundStats(r);
     STATE.players.forEach(p => per[p].r[r-1] = st[p] ? { pts: st[p].pts, apps: st[p].apps } : { pts:0, apps:0 } );
   }
+
   const list = STATE.players.map(p => {
     const r1=per[p].r[0], r2=per[p].r[1], r3=per[p].r[2], r4=per[p].r[3];
-    const total = r1.pts + r2.pts + r3.pts + r4.pts;
-    return [p, r1.pts, r1.apps, r2.pts, r2.apps, r3.pts, r3.apps, r4.pts, r4.apps, total];
-  }).sort((a,b) => b[9]-a[9] || a[0].localeCompare(b[0]));
+    const totalPts  = r1.pts + r2.pts + r3.pts + r4.pts;
+    const totalApps = r1.apps + r2.apps + r3.apps + r4.apps;
+    return [p, r1.pts, r1.apps, r2.pts, r2.apps, r3.pts, r3.apps, r4.pts, r4.apps, totalPts, totalApps];
+  }).sort((a,b) => b[9]-a[9] || a[0].localeCompare(b[0])); // 依总分降序（索引9是 Total Points）
+
   list.forEach((r,i)=> rows.push([i+1, ...r]));
-  const csv = rows.map(r => r.map(c => { const s = String(c); return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s; }).join(",")).join("\n");
+
+  const csv = rows.map(r => r.map(c => {
+    const s = String(c);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+  }).join(",")).join("\n");
+
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
-  const a = document.createElement("a"); a.href = url; a.download = "Overall_Leaderboard.csv"; document.body.appendChild(a); a.click();
+  const a = document.createElement("a");
+  a.href = url; a.download = "Overall_Leaderboard.csv";
+  document.body.appendChild(a); a.click();
   setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 0);
 }
+
 
 /* =========================
    Generate / Build / Submit / Resubmit
@@ -675,7 +866,7 @@ function generateR1(){
     } else {
       document.getElementById("courtBCard").style.display = STATE.courtMode === "2" ? "" : "none";
     }
-
+    STATE.partnerStats = {};    // ✅ 新增：重新开始统计
     scheduleCurrent();
     renderRound();
     renderLeaderboards();
@@ -828,6 +1019,7 @@ function resetAll(){
   STATE.matches = {1:{A:[],B:[]},2:{A:[],B:[]},3:{A:[],B:[]},4:{A:[],B:[]}};
   STATE.results = {1:{A:[],B:[]},2:{A:[],B:[]},3:{A:[],B:[]},4:{A:[],B:[]}};
   STATE.submittedAt = {};
+  STATE.partnerStats = {};   // ✅ 新增
   document.getElementById("playersInput").value = "";
   document.getElementById("matchesPerPlayer").value = 4;
   document.getElementById("courtMode").value = "2";
@@ -947,6 +1139,8 @@ const parsed = JSON.parse(restored);
       Object.assign(STATE, parsed);
       console.log("✅ State restored from QR", STATE);
 
+      recomputePartnerStatsFromAllMatches();   // 🔥 补算搭档统计，兼容老数据
+
       // 🔥 同步 UI 输入框
       document.getElementById("playersInput").value = STATE.players.join(", ");
       document.getElementById("matchesPerPlayer").value = STATE.matchesPerPlayer;
@@ -974,6 +1168,7 @@ const parsed = JSON.parse(restored);
 
   // ✅ 如果没有二维码参数，则从 localStorage 恢复
   loadState();
+  recomputePartnerStatsFromAllMatches();   // ✅ 新增
   renderRound();
   renderLeaderboards();
 });
@@ -982,6 +1177,16 @@ const parsed = JSON.parse(restored);
 </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
 
 
 
